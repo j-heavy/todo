@@ -8,6 +8,8 @@ const isOverdue = (todo) =>
 
 export function App() {
   const [todos, setTodos] = useState([])
+  const [loading, setLoading] = useState(true)
+  const [loadError, setLoadError] = useState('')
 
   const [text, setText] = useState('')
   const [category, setCategory] = useState('')
@@ -27,19 +29,19 @@ export function App() {
 
   const categoryRef = useRef(null)
 
-const existingCategories = useMemo(() => {
-  const set = new Set()
-  for (const t of todos) {
-    const c = (t.category || '').trim()
-    if (c && c !== 'Без категории') set.add(c)
-  }
-  return Array.from(set).sort((a, b) => a.localeCompare(b))
-}, [todos])
+  const existingCategories = useMemo(() => {
+    const set = new Set()
+    for (const t of todos) {
+      const c = (t.category || '').trim()
+      if (c && c !== 'Без категории') set.add(c)
+    }
+    return Array.from(set).sort((a, b) => a.localeCompare(b))
+  }, [todos])
 
-const pickCategory = (c) => {
-  setCategory(c)
-  categoryRef.current?.focus()
-}
+  const pickCategory = (c) => {
+    setCategory(c)
+    categoryRef.current?.focus()
+  }
 
   useEffect(() => {
     localStorage.setItem('glow', JSON.stringify(glowEnabled))
@@ -50,12 +52,23 @@ const pickCategory = (c) => {
   }, [])
 
   const loadTodos = async () => {
-    const { data, error } = await supabase
-      .from('todos')
-      .select('*')
-      .order('position', { ascending: true })
+    setLoading(true)
+    setLoadError('')
 
-    if (!error && data) setTodos(data)
+    try {
+      const { data, error } = await supabase
+        .from('todos')
+        .select('*')
+        .order('position', { ascending: true })
+
+      if (error) throw error
+      setTodos(data ?? [])
+    } catch (e) {
+      console.error('loadTodos error:', e)
+      setLoadError(e?.message || 'Ошибка загрузки')
+    } finally {
+      setLoading(false)
+    }
   }
 
   const addTodo = async () => {
@@ -76,9 +89,12 @@ const pickCategory = (c) => {
       .select()
       .single()
 
-    if (!error && data) {
-      setTodos([...todos, data])
+    if (error) {
+      console.error('addTodo error:', error)
+      return
     }
+
+    if (data) setTodos([...todos, data])
 
     setText('')
     setCategory('')
@@ -97,25 +113,29 @@ const pickCategory = (c) => {
       return
     }
 
-    // оптимистично
     setTodos(todos.map((t) => (t.id === id ? { ...t, text: editText } : t)))
     setEditingId(null)
 
-    await supabase.from('todos').update({ text: editText }).eq('id', id)
+    const { error } = await supabase.from('todos').update({ text: editText }).eq('id', id)
+    if (error) console.error('saveEdit error:', error)
   }
 
   const toggleDone = async (todo) => {
     const nextDone = !todo.done
-
-    // оптимистично
     setTodos(todos.map((t) => (t.id === todo.id ? { ...t, done: nextDone } : t)))
 
-    await supabase.from('todos').update({ done: nextDone }).eq('id', todo.id)
+    const { error } = await supabase
+      .from('todos')
+      .update({ done: nextDone })
+      .eq('id', todo.id)
+
+    if (error) console.error('toggleDone error:', error)
   }
 
   const removeTodo = async (todo) => {
     setTodos(todos.filter((t) => t.id !== todo.id))
-    await supabase.from('todos').delete().eq('id', todo.id)
+    const { error } = await supabase.from('todos').delete().eq('id', todo.id)
+    if (error) console.error('removeTodo error:', error)
   }
 
   const onDragStart = (todo) => {
@@ -126,27 +146,27 @@ const pickCategory = (c) => {
   const onDropCategory = async (cat) => {
     if (!draggedTodo) return
 
-    setTodos(
-      todos.map((t) => (t.id === draggedTodo.id ? { ...t, category: cat } : t))
-    )
+    setTodos(todos.map((t) => (t.id === draggedTodo.id ? { ...t, category: cat } : t)))
 
-    await supabase.from('todos').update({ category: cat }).eq('id', draggedTodo.id)
+    const { error } = await supabase
+      .from('todos')
+      .update({ category: cat })
+      .eq('id', draggedTodo.id)
+
+    if (error) console.error('onDropCategory error:', error)
 
     setDraggedTodo(null)
     setDragId(null)
   }
 
   const persistPositions = async (list) => {
-  // обновляем только position, без upsert
-  const updates = list.map((t) =>
-    supabase.from('todos').update({ position: t.position }).eq('id', t.id)
-  )
+    const results = await Promise.all(
+      list.map((t) => supabase.from('todos').update({ position: t.position }).eq('id', t.id))
+    )
 
-  const results = await Promise.all(updates)
-  const bad = results.find(r => r.error)
-  if (bad?.error) console.error('persistPositions error:', bad.error)
-}
-
+    const firstError = results.find((r) => r.error)?.error
+    if (firstError) console.error('persistPositions error:', firstError)
+  }
 
   const onDrop = async (id) => {
     if (dragId === null || dragId === id) return
@@ -174,20 +194,20 @@ const pickCategory = (c) => {
     }
   }
 
-  // сортируем для отображения (overdue/priority/deadline),
-  // но группировка остаётся поверх этого порядка
-  // показываем в порядке position (это и меняет drag&drop)
-const orderedTodos = [...todos].sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
+  const orderedTodos = [...todos].sort((a, b) => (a.position ?? 0) - (b.position ?? 0))
 
-const grouped = orderedTodos.reduce((acc, todo) => {
-  acc[todo.category] ||= []
-  acc[todo.category].push(todo)
-  return acc
-}, {})
+  const grouped = orderedTodos.reduce((acc, todo) => {
+    acc[todo.category] ||= []
+    acc[todo.category].push(todo)
+    return acc
+  }, {})
 
   return (
     <div class={`todo-app ${glowEnabled ? 'glow-on' : 'glow-off'}`} onKeyDown={onKeyDown}>
       <h1 class="glow">ВОРКАЕМ</h1>
+
+      {loading && <div class="loading">Загрузка…</div>}
+      {loadError && <div class="error">Ошибка: {loadError}</div>}
 
       <div class="glow-toggle">
         <span>Неон</span>
@@ -218,20 +238,21 @@ const grouped = orderedTodos.reduce((acc, todo) => {
             onInput={(e) => setCategory(e.target.value)}
             placeholder="Например: покупки или работа по дому"
           />
+
           {existingCategories.length > 0 && (
-  <div class="category-chips">
-    {existingCategories.map((c) => (
-      <button
-        type="button"
-        class="category-chip"
-        onClick={() => pickCategory(c)}
-        title="Подставить категорию"
-      >
-        {c}
-      </button>
-    ))}
-  </div>
-)}
+            <div class="category-chips">
+              {existingCategories.map((c) => (
+                <button
+                  type="button"
+                  class="category-chip"
+                  onClick={() => pickCategory(c)}
+                  title="Подставить категорию"
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+          )}
         </label>
 
         <label class="field">
