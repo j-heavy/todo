@@ -1,12 +1,11 @@
-import { useEffect, useState, useMemo, useRef } from 'preact/hooks'
+import { useEffect, useMemo, useRef, useState } from 'preact/hooks'
 import { supabase } from './supabase'
-
-const priorities = ['low', 'medium', 'high']
 
 const isOverdue = (todo) =>
   todo.deadline && !todo.done && todo.deadline < new Date().toISOString().slice(0, 10)
 
 export function App() {
+  // --- TODOS ---
   const [todos, setTodos] = useState([])
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
@@ -22,11 +21,13 @@ export function App() {
   const [editingId, setEditingId] = useState(null)
   const [editText, setEditText] = useState('')
 
+  // --- UI prefs ---
   const [glowEnabled, setGlowEnabled] = useState(() => {
     const saved = localStorage.getItem('glow')
     return saved ? JSON.parse(saved) : true
   })
 
+  // --- Categories chips ---
   const categoryRef = useRef(null)
 
   const existingCategories = useMemo(() => {
@@ -47,6 +48,7 @@ export function App() {
     localStorage.setItem('glow', JSON.stringify(glowEnabled))
   }, [glowEnabled])
 
+  // --- Load todos ---
   useEffect(() => {
     loadTodos()
   }, [])
@@ -124,11 +126,7 @@ export function App() {
     const nextDone = !todo.done
     setTodos(todos.map((t) => (t.id === todo.id ? { ...t, done: nextDone } : t)))
 
-    const { error } = await supabase
-      .from('todos')
-      .update({ done: nextDone })
-      .eq('id', todo.id)
-
+    const { error } = await supabase.from('todos').update({ done: nextDone }).eq('id', todo.id)
     if (error) console.error('toggleDone error:', error)
   }
 
@@ -163,7 +161,6 @@ export function App() {
     const results = await Promise.all(
       list.map((t) => supabase.from('todos').update({ position: t.position }).eq('id', t.id))
     )
-
     const firstError = results.find((r) => r.error)?.error
     if (firstError) console.error('persistPositions error:', firstError)
   }
@@ -202,14 +199,88 @@ export function App() {
     return acc
   }, {})
 
+  // --- NOTES (chat-like, collapsible, no page-jump) ---
+  const [notesOpen, setNotesOpen] = useState(false) // свернуто по умолчанию
+  const [notes, setNotes] = useState([])
+  const [noteText, setNoteText] = useState('')
+  const [notesLoading, setNotesLoading] = useState(true)
+  const [notesError, setNotesError] = useState('')
+
+  const notesListRef = useRef(null)
+  const stickToBottomRef = useRef(true)
+
+  const syncStickToBottom = () => {
+    const el = notesListRef.current
+    if (!el) return
+    const gap = el.scrollHeight - el.scrollTop - el.clientHeight
+    stickToBottomRef.current = gap < 24
+  }
+
+  const scrollNotesToBottom = () => {
+    const el = notesListRef.current
+    if (!el) return
+    el.scrollTop = el.scrollHeight
+  }
+
+  useEffect(() => {
+    loadNotes()
+  }, [])
+
+  useEffect(() => {
+    if (!notesOpen) return
+    if (stickToBottomRef.current) {
+      requestAnimationFrame(scrollNotesToBottom)
+    }
+  }, [notesOpen, notes])
+
+  const loadNotes = async () => {
+    setNotesLoading(true)
+    setNotesError('')
+
+    try {
+      const { data, error } = await supabase
+        .from('notes')
+        .select('*')
+        .order('inserted_at', { ascending: true })
+
+      if (error) throw error
+      setNotes(data ?? [])
+    } catch (e) {
+      console.error('loadNotes error:', e)
+      setNotesError(e?.message || 'Ошибка загрузки заметок')
+    } finally {
+      setNotesLoading(false)
+    }
+  }
+
+  const addNote = async () => {
+    const value = noteText.trim()
+    if (!value) return
+
+    setNotesError('')
+
+    const { data, error } = await supabase.from('notes').insert({ text: value }).select().single()
+
+    if (error) {
+      console.error('addNote error:', error)
+      setNotesError(error.message)
+      return
+    }
+
+    if (data) setNotes([...notes, data])
+    setNoteText('')
+  }
+
+  const deleteNote = async (id) => {
+    setNotes(notes.filter((n) => n.id !== id))
+    const { error } = await supabase.from('notes').delete().eq('id', id)
+    if (error) console.error('deleteNote error:', error)
+  }
+
   return (
     <div class={`todo-app ${glowEnabled ? 'glow-on' : 'glow-off'}`} onKeyDown={onKeyDown}>
       <h1 class="glow">ВОРКАЕМ</h1>
-
-      {loading && <div class="loading">Загрузка…</div>}
-      {loadError && <div class="error">Ошибка: {loadError}</div>}
-
-      <div class="glow-toggle">
+       <div class="glow-toggle">
         <span>Неон</span>
         <button
           class={`toggle ${glowEnabled ? 'on' : 'off'}`}
@@ -219,6 +290,70 @@ export function App() {
           <span class="dot" />
         </button>
       </div>
+      {/* NOTES (вверху, сворачиваемые) */}
+      <div class={`notes-chat ${notesOpen ? 'open' : 'closed'}`}>
+        <div
+          class="notes-header"
+          onClick={() => {
+            setNotesOpen((v) => {
+              const next = !v
+              if (next) requestAnimationFrame(scrollNotesToBottom)
+              return next
+            })
+          }}
+        >
+          <h2 class="notes-title">Заметки</h2>
+          <span class="notes-toggle">{notesOpen ? '▾' : '▸'}</span>
+        </div>
+
+        {notesOpen && (
+          <>
+            {notesLoading && <div class="loading">Загрузка заметок…</div>}
+            {notesError && <div class="error">Ошибка: {notesError}</div>}
+
+            <div class="notes-list" ref={notesListRef} onScroll={syncStickToBottom}>
+              {notes.map((n) => (
+                <div class="note-bubble" key={n.id}>
+                  <div class="note-text">{n.text}</div>
+                  <div class="note-meta">
+                    <span>{new Date(n.inserted_at).toLocaleString()}</span>
+                    <button
+                      class="note-del"
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        deleteNote(n.id)
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div class="notes-input" onClick={(e) => e.stopPropagation()}>
+              <input
+                value={noteText}
+                onInput={(e) => setNoteText(e.target.value)}
+                placeholder="Напиши заметку…"
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey) {
+                    e.preventDefault()
+                    addNote()
+                  }
+                }}
+              />
+              <button type="button" onClick={addNote}>
+                Отправить
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
+      {loading && <div class="loading">Загрузка…</div>}
+      {loadError && <div class="error">Ошибка: {loadError}</div>}
 
       <div class="todo-form">
         <label class="field">
